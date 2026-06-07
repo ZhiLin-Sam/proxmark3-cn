@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build artifacts
+*.o
+*.d
+*.elf
+*.bin
+*.zip
+*.tar.gz
+*.tar.xz
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM3 build outputs
+src/client/obj/
+src/client/deps/
+src/obj/
+src/client/proxmark3
+
+# Large binaries (tracked via GitHub Release)
+*.exe
