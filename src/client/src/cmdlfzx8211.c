@@ -1,0 +1,175 @@
+//-----------------------------------------------------------------------------
+// Copyright (C) Proxmark3 contributors. See AUTHORS.md for details.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// See LICENSE.txt for the text of the license.
+//-----------------------------------------------------------------------------
+// Low frequency ZX8211 tag commands
+//-----------------------------------------------------------------------------
+
+#include "cmdlfzx8211.h"
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include "commonutil.h"    // ARRAYLEN
+#include "common.h"
+#include "cmdparser.h"     // command_t
+#include "comms.h"
+#include "ui.h"
+#include "graph.h"
+#include "cmddata.h"
+#include "cmdlf.h"
+#include "protocols.h"     // for T55xx config register definitions
+#include "lfdemod.h"       // parityTest
+#include "cmdlft55xx.h"    // write verify
+#include "cliparser.h"
+#include "zx8211.h"
+
+static int CmdHelp(const char *Cmd);
+
+// see ASKDemod for what args are accepted
+int demodzx(bool verbose) {
+    (void) verbose; // unused so far
+    buffer_savestate_t saveState = save_bufferS32(g_GraphBuffer, g_GraphTraceLen);
+    saveState.offset = g_GridOffset;
+
+    // CmdAskEdgeDetect("");
+
+    // ASK / Manchester
+    bool st = true;
+    if (ASKDemod_ext(64, 0, 0, 0, false, false, false, 1, &st) != PM3_SUCCESS) {
+        PrintAndLogEx(DEBUG, "DEBUG: 错误 - ZX: ASK/曼彻斯特解调失败");
+        restore_bufferS32(saveState, g_GraphBuffer);
+        g_GridOffset = saveState.offset;
+        return PM3_ESOFT;
+    }
+    size_t size = g_DemodBufferLen;
+    int ans = detectzx(g_DemodBuffer, &size);
+    if (ans < 0) {
+        if (ans == -1)
+            PrintAndLogEx(DEBUG, "DEBUG: 错误 - ZX: 找到的比特太少");
+        else if (ans == -2)
+            PrintAndLogEx(DEBUG, "DEBUG: 错误 - ZX: 未找到前导码");
+        else if (ans == -3)
+            PrintAndLogEx(DEBUG, "DEBUG: 错误 - ZX: 大小不正确: %zu", size);
+        else
+            PrintAndLogEx(DEBUG, "DEBUG: 错误 - ZX: ans: %d", ans);
+
+        restore_bufferS32(saveState, g_GraphBuffer);
+        g_GridOffset = saveState.offset;
+        return PM3_ESOFT;
+    }
+    setDemodBuff(g_DemodBuffer, 96, ans);
+    setClockGrid(g_DemodClock, g_DemodStartIdx + (ans * g_DemodClock));
+
+    // got a good demod
+    uint32_t raw1 = bytebits_to_byte(g_DemodBuffer, 32);
+
+    // chksum
+
+    // test checksums
+
+    PrintAndLogEx(SUCCESS, "ZX8211 - Card " _GREEN_("%u"), raw1);
+    return PM3_SUCCESS;
+}
+
+static int lf_Zx_read(void) {
+
+    PacketResponseNG resp;
+    clearCommandBuffer();
+
+    SendCommandNG(CMD_LF_ZX_READ, NULL, 0);
+
+    if (WaitForResponseTimeout(CMD_LF_ZX_READ, &resp, 1000) == false) {
+        PrintAndLogEx(ERR, "发生错误，设备在读操作期间无响应。");
+        return PM3_ETIMEOUT;
+    }
+
+    return PM3_SUCCESS;
+}
+
+static int CmdZxDemod(const char *Cmd) {
+    CLIParserContext *ctx;
+    CLIParserInit(&ctx, "低频ZX解调",
+                  "尝试查找zx8211前导码，如果找到则解码/解扰数据",
+                  "低频ZX解调"
+                 );
+
+    void *argtable[] = {
+        arg_param_begin,
+        arg_param_end
+    };
+    CLIExecWithReturn(ctx, Cmd, argtable, true);
+    CLIParserFree(ctx);
+    return demodzx(true);
+}
+
+static int CmdzxReader(const char *Cmd) {
+    CLIParserContext *ctx;
+    CLIParserInit(&ctx, "低频ZX读取器",
+                  "读取 zx 标签",
+                  "lf zx reader -@   -> continuous reader mode"
+                 );
+
+    void *argtable[] = {
+        arg_param_begin,
+        arg_lit0("@", NULL, "optional - continuous reader mode"),
+        arg_param_end
+    };
+    CLIExecWithReturn(ctx, Cmd, argtable, true);
+    bool cm = arg_get_lit(ctx, 1);
+    CLIParserFree(ctx);
+
+    if (cm) {
+        PrintAndLogEx(INFO, "Press " _GREEN_("<Enter>") " to exit");
+    }
+
+    do {
+        lf_Zx_read();
+        demodzx(!cm);
+    } while (cm && (kbd_enter_pressed() == false));
+    return PM3_SUCCESS;
+}
+
+
+static command_t CommandTable[] = {
+    {"help",    CmdHelp,         AlwaysAvailable, "此帮助"},
+    {"demod",   CmdZxDemod,      AlwaysAvailable, "从GraphBuffer解调ZX 8211标签"},
+    {"reader",  CmdzxReader,     IfPm3Lf,         "尝试读取并提取标签数据"},
+    {NULL, NULL, NULL, NULL}
+};
+
+static int CmdHelp(const char *Cmd) {
+    (void)Cmd; // Cmd is not used so far
+    CmdsHelp(CommandTable);
+    return PM3_SUCCESS;
+}
+
+int CmdLFZx8211(const char *Cmd) {
+    clearCommandBuffer();
+    return CmdsParse(CommandTable, Cmd);
+}
+
+int detectzx(uint8_t *dest, size_t *size) {
+    if (*size < 96) return -1; // make sure buffer has data
+    size_t startIdx = 0;
+    uint8_t preamble[] = {0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    if (!preambleSearch(dest, preamble, sizeof(preamble), size, &startIdx))
+        return -2; // preamble not found
+    if (*size != 96) return -3; // wrong demoded size
+    // return start position
+    return (int)startIdx;
+}
+
+
