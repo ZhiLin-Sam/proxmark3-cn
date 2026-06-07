@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-translate_async.py - Async DeepSeek translation of all extracted strings.
-API: DeepSeek chat, 200 concurrent, batch 30 strings per request.
+translate_async.py - Async batch translation via OpenAI-compatible API.
+Supports: DeepSeek, OpenAI, Qwen, GLM, or any OpenAI-compatible endpoint.
 Input: /tmp/cn2_to_translate.json
 Output: /tmp/zh_trans_cn2.py (Python dict)
+
+Usage:
+  export OPENAI_API_KEY="your-api-key"
+  export OPENAI_API_BASE="https://api.deepseek.com"   # or any compatible endpoint
+  python3 translate_async.py
 """
 import json, asyncio, time, os, sys
 from openai import AsyncOpenAI
 
 INPUT = "/tmp/cn2_to_translate.json"
 OUTPUT = "/tmp/zh_trans_cn2.py"
-API_KEY = os.environ.get("DEEPSEEK_API_KEY", "your-deepseek-api-key")
-API_BASE = "https://api.deepseek.com"
+API_KEY = os.environ.get("OPENAI_API_KEY", "your-api-key-here")
+API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.deepseek.com")
 BATCH_SIZE = 30
 MAX_CONCURRENT = 200
 TEMPERATURE = 0.01
